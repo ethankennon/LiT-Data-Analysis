@@ -51,11 +51,11 @@ def extract_images(db_path: str, output_dir: str, collection_id: int | None = No
         params.append(collection_id)
 
     cursor.execute(
-        "SELECT e.id, e.collectionId, e.timestamp, t.image, t.gain "
+        "SELECT e.id, e.collectionId, e.timestamp, t.image, t.minTemp, t.maxTemp "
         "FROM events e "
         "JOIN thermal_imgs t ON t.id = e.id "
         f"WHERE e.type = 'THERMAL_IMG'{collection_filter} "
-        "ORDER BY e.id",
+        "ORDER BY e.timestamp ASC",
         params,
     )
     rows = cursor.fetchall()
@@ -74,7 +74,8 @@ def extract_images(db_path: str, output_dir: str, collection_id: int | None = No
         coll_id = row["collectionId"]
         boot_ns = row["timestamp"]
         image_bytes = row["image"]
-        gain = row["gain"]
+        min_temp = row["minTemp"]
+        max_temp = row["maxTemp"]
 
         coll_name, date_time_ms = collections.get(coll_id, ("unknown", None))
 
@@ -90,6 +91,11 @@ def extract_images(db_path: str, output_dir: str, collection_id: int | None = No
             iso_ts = f"boot_{boot_ns}ns"
             wall_dt = None
 
+        # Trim temperature values to 2 decimal places for manifest readability
+        min_temp = round(min_temp, 2) if min_temp is not None else None
+        max_temp = round(max_temp, 2) if max_temp is not None else None
+        trimmed_temps = f"{min_temp}C-{max_temp}C" if min_temp is not None and max_temp is not None else "No-Range"
+
         # One subdirectory per collection
         if coll_id != prev_collection_id:
             dir_name = f"collection_{coll_id}_{safe_dirname(coll_name)}"
@@ -97,7 +103,7 @@ def extract_images(db_path: str, output_dir: str, collection_id: int | None = No
             frame_dir.mkdir(exist_ok=True)
             prev_collection_id = coll_id
 
-        filename = f"frame_{event_id:05d}_{iso_ts}.png"
+        filename = f"frame_{iso_ts}_{trimmed_temps}.png"
         filepath = frame_dir / filename
         filepath.write_bytes(image_bytes)
 
@@ -108,7 +114,8 @@ def extract_images(db_path: str, output_dir: str, collection_id: int | None = No
                 "collection_name": coll_name,
                 "boot_timestamp_ns": boot_ns,
                 "wall_clock_utc": wall_dt.isoformat() if wall_dt else "",
-                "gain": gain,
+                "min_temp": min_temp,
+                "max_temp": max_temp,
                 "file": str(filepath.relative_to(output)),
             }
         )
@@ -116,7 +123,7 @@ def extract_images(db_path: str, output_dir: str, collection_id: int | None = No
     # Write manifest CSV
     manifest_path = output / "manifest.csv"
     fieldnames = ["event_id", "collection_id", "collection_name",
-                  "boot_timestamp_ns", "wall_clock_utc", "gain", "file"]
+                  "boot_timestamp_ns", "wall_clock_utc", "min_temp", "max_temp", "file"]
     with open(manifest_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
