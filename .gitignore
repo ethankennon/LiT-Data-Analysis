@@ -1,3 +1,7 @@
 capture_database.db
 oscilloscope.csv
+oscilloscope_transitions.csv
+serial_sends.csv
 /images
+/Working\ Folder
+pixel_temps.csv

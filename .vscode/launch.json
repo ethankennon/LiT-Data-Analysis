@@ -12,6 +12,15 @@
 			"program": "/home/elkennon/Projects/Lock in Thermography/Offline Data Analysis/extract_thermal_images.py",
 			"console": "integratedTerminal",
 			"args": ["capture_database.db", "./images"]
+		},
+
+		{
+			"name": "Extract Pixel Temperature Profile to CSV with Default Arguments",
+			"type": "debugpy",
+			"request": "launch",
+			"program": "/home/elkennon/Projects/Lock in Thermography/Offline Data Analysis/pixel_temperature.py",
+			"console": "integratedTerminal",
+			"args": ["capture_database.db", "320", "240", "pixel_temps.csv"]
 		}
 	]
 }
