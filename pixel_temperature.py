@@ -19,7 +19,7 @@ import sqlite3
 from PIL import Image
 
 
-def sample_pixel(db_path: str, px: int, py: int, output_csv: str, collection_id: int | None = None) -> None:
+def sample_pixel(db_path: str, px: int, py: int, output_csv: str, collection_id: int | None = None, threshold: float = 0.2) -> None:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
@@ -59,21 +59,37 @@ def sample_pixel(db_path: str, px: int, py: int, output_csv: str, collection_id:
         max_temp = row["maxTemp"]
         temperature = min_temp + (gray / 255.0) * (max_temp - min_temp)
 
+        ts = row["timestamp"]
+        prev = results[-1] if results else None
+        if prev is None:
+            status = "neutral"
+        elif ts - prev["boot_timestamp_ns"] > 200_000_000:
+            status = "invalid"
+        else:
+            delta = round(temperature, 4) - prev["temperature_c"]
+            if delta > threshold:
+                status = "rising"
+            elif delta < -threshold:
+                status = "falling"
+            else:
+                status = "neutral"
+
         results.append({
             "event_id": row["id"],
             "collection_id": row["collectionId"],
-            "boot_timestamp_ns": row["timestamp"],
+            "boot_timestamp_ns": ts,
             "gray_value": gray,
             "min_temp": min_temp,
             "max_temp": max_temp,
             "temperature_c": round(temperature, 4),
+            "status": status,
         })
 
     with open(output_csv, "w", newline="") as f:
         writer = csv.DictWriter(
             f,
             fieldnames=["event_id", "collection_id", "boot_timestamp_ns",
-                        "gray_value", "min_temp", "max_temp", "temperature_c"],
+                        "gray_value", "min_temp", "max_temp", "temperature_c", "status"],
         )
         writer.writeheader()
         writer.writerows(results)
@@ -93,9 +109,13 @@ def main() -> None:
         "--collection", type=int, default=None,
         help="Restrict to a single collection ID (default: all collections)",
     )
+    parser.add_argument(
+        "--threshold", type=float, default=0.2,
+        help="Temperature change (°C) required to classify a frame as rising/falling (default: 0.2)",
+    )
     args = parser.parse_args()
 
-    sample_pixel(args.db, args.x, args.y, args.output, args.collection)
+    sample_pixel(args.db, args.x, args.y, args.output, args.collection, args.threshold)
 
 
 if __name__ == "__main__":
