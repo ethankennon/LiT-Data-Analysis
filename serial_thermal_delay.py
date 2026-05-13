@@ -12,6 +12,7 @@ or the string "invalid" when the first matching frame has status 'invalid'.
 Usage:
     python3 serial_thermal_delay.py capture_database.db <x> <y> output.csv
     python3 serial_thermal_delay.py capture_database.db <x> <y> output.csv --threshold 0.5
+    python3 serial_thermal_delay.py capture_database.db <x> <y> output.csv --collection 3
 """
 
 import argparse
@@ -25,15 +26,18 @@ from pathlib import Path
 from PIL import Image
 
 
-def load_thermal_frames(conn, px: int, py: int, threshold: float) -> dict[int, list]:
+def load_thermal_frames(conn, px: int, py: int, threshold: float, collection_id: int | None = None) -> dict[int, list]:
     """Return thermal frames keyed by collection_id, each sorted by timestamp, with status."""
     cursor = conn.cursor()
+    collection_filter = "" if collection_id is None else " AND e.collectionId = ?"
+    params = [] if collection_id is None else [collection_id]
     cursor.execute(
         "SELECT e.id, e.collectionId, e.timestamp, t.image, t.minTemp, t.maxTemp "
         "FROM events e "
         "JOIN thermal_imgs t ON t.id = e.id "
-        "WHERE e.type = 'THERMAL_IMG' "
-        "ORDER BY e.collectionId, e.timestamp ASC"
+        f"WHERE e.type = 'THERMAL_IMG'{collection_filter} "
+        "ORDER BY e.collectionId, e.timestamp ASC",
+        params,
     )
     rows = cursor.fetchall()
 
@@ -88,15 +92,18 @@ def find_next_matching_frame(frames: list, after_ts: int, target_statuses: set) 
     return None
 
 
-def export_combined(db_path: str, px: int, py: int, output_path: str, threshold: float = 0.2) -> None:
+def export_combined(db_path: str, px: int, py: int, output_path: str, threshold: float = 0.2, collection_id: int | None = None) -> None:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
 
     print(f"Loading thermal frames for pixel ({px}, {py})...")
-    col_frames = load_thermal_frames(conn, px, py, threshold)
+    col_frames = load_thermal_frames(conn, px, py, threshold, collection_id)
+
+    collection_filter = "" if collection_id is None else " AND e.collectionId = ?"
+    serial_params = [] if collection_id is None else [collection_id]
 
     cur = conn.cursor()
-    cur.execute("""
+    cur.execute(f"""
         SELECT
             e.id           AS event_id,
             e.collectionId AS collection_id,
@@ -108,9 +115,9 @@ def export_combined(db_path: str, px: int, py: int, output_path: str, threshold:
         FROM events e
         JOIN serial_msgs        sm ON sm.id  = e.id
         JOIN collection_details cd ON cd.id  = e.collectionId
-        WHERE cd.dateTime IS NOT NULL
+        WHERE cd.dateTime IS NOT NULL{collection_filter}
         ORDER BY e.collectionId, e.timestamp
-    """)
+    """, serial_params)
     serial_rows = list(cur.fetchall())
     conn.close()
 
@@ -192,12 +199,16 @@ def main() -> None:
         "--threshold", type=float, default=0.2,
         help="Temperature change (°C) required to classify a frame as rising/falling (default: 0.2)",
     )
+    parser.add_argument(
+        "--collection", type=int, default=None,
+        help="Restrict to a single collection ID (default: all collections)",
+    )
     args = parser.parse_args()
 
     if not Path(args.db).exists():
         parser.error(f"Database not found: {args.db}")
 
-    export_combined(args.db, args.x, args.y, args.output, args.threshold)
+    export_combined(args.db, args.x, args.y, args.output, args.threshold, args.collection)
 
 
 if __name__ == "__main__":
