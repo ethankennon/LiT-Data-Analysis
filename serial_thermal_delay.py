@@ -75,7 +75,7 @@ def load_thermal_frames(conn, px: int, py: int, threshold: float, collection_id:
             else:
                 status = "neutral"
 
-        frame = {"boot_timestamp_ns": ts, "temperature_c": temperature, "status": status}
+        frame = {"event_id": row["id"], "boot_timestamp_ns": ts, "temperature_c": temperature, "status": status}
         col_frames[col_id].append(frame)
         prev_by_col[col_id] = frame
 
@@ -134,6 +134,7 @@ def export_combined(db_path: str, px: int, py: int, output_path: str, threshold:
         "data_sent",
         "delay_to_next_receive_s",
         "delay_to_output_observed",
+        "matched_thermal_event_id",
     ]
 
     TARGET_STATUSES = {
@@ -160,10 +161,12 @@ def export_combined(db_path: str, px: int, py: int, output_path: str, threshold:
 
                 msg = ev["message"]
                 delay_to_output = ""
+                matched_thermal_event_id = ""
                 target = TARGET_STATUSES.get(msg)
                 if target is not None and frames:
                     match = find_next_matching_frame(frames, ev["boot_ns"], target)
                     if match is not None:
+                        matched_thermal_event_id = match["event_id"]
                         if match["status"] == "invalid":
                             delay_to_output = "invalid"
                         else:
@@ -178,6 +181,7 @@ def export_combined(db_path: str, px: int, py: int, output_path: str, threshold:
                     "data_sent": msg,
                     "delay_to_next_receive_s": f"{delay_receive:.6f}" if delay_receive != "" else "",
                     "delay_to_output_observed": delay_to_output,
+                    "matched_thermal_event_id": matched_thermal_event_id,
                 })
 
     with open(output_path) as f:
