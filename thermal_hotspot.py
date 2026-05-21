@@ -9,11 +9,14 @@ Events are processed in timestamp order per collection:
     excitation edge, +1 at the midpoint of the 'e' phase, and -1 at the midpoint
     of the 'd' phase.
   - For each thermal image following an 'e' or 'd' SEND, pixel temperatures are
-    multiplied by sin(2π·elapsed/period) before being added to the accumulator.
+    multiplied by sin(2π·elapsed/period + φ) and accumulated into 360 matrices,
+    one per degree of phase offset φ (0°–359°).
   - Processing stops after the last SEND matching the first SEND command seen.
 
-The accumulator is normalised to [0, 255] and saved as a grayscale PNG whose
-filename encodes the matrix min/max and frame counts.
+Two images are saved:
+  - Hotspot (φ=0°): accumulator[0] normalised to [0, 255].
+  - Phase: each pixel shows the phase offset (0°–359°) whose accumulator had the
+    highest value at that position. White = 0°, black = 359°.
 
 Dependencies: Pillow, numpy
 
@@ -111,8 +114,12 @@ def build_hotspot(db_path: str, output_prefix: str, collection_id: int | None = 
     print(f"Detected period: {period_ns / 1e9:.4f} s  ({len(first_cmd_times)} '{first_cmd}' sends)")
     print(f"Phase reference timestamp: {phase_ref_ns}")
 
-    # Pass 2: accumulate pixel temperatures weighted by sin(2π·elapsed/period)
-    accumulator: np.ndarray | None = None
+    # Precompute phase offsets for 360 matrices (0° to 359°)
+    phase_offsets_rad = np.deg2rad(np.arange(360, dtype=np.float32))
+
+    # Pass 2: accumulate pixel temperatures weighted by sin(2π·elapsed/period + φ)
+    # accumulators shape: (360, height, width), float32 to limit memory (~442 MB)
+    accumulators: np.ndarray | None = None
     n_add = n_sub = 0
     seen_first_serial = False
     last_send: str | None = None
@@ -137,47 +144,63 @@ def build_hotspot(db_path: str, output_prefix: str, collection_id: int | None = 
             continue
 
         img = Image.open(io.BytesIO(row["img_blob"])).convert("L")
-        gray = np.array(img, dtype=np.float64)  # shape (height, width)
+        gray = np.array(img, dtype=np.float32)  # shape (height, width)
 
-        if accumulator is None:
-            accumulator = np.zeros(gray.shape, dtype=np.float64)
+        if accumulators is None:
+            accumulators = np.zeros((360, *gray.shape), dtype=np.float32)
 
         min_t: float = row["minTemp"]
         max_t: float = row["maxTemp"]
-        temps = min_t + (gray / 255.0) * (max_t - min_t)
+        temps = min_t + (gray / 255.0) * (max_t - min_t)  # shape (H, W)
 
         elapsed_ns = row["timestamp"] - phase_ref_ns
-        sine_weight = np.sin(2 * np.pi * elapsed_ns / period_ns)
+        base_angle = 2 * np.pi * elapsed_ns / period_ns
+        sine_weights = np.sin(base_angle + phase_offsets_rad)  # shape (360,)
 
-        accumulator += sine_weight * temps
+        # Accumulate each phase matrix; loop avoids a (360, H, W) intermediate array
+        for phi_idx in range(360):
+            accumulators[phi_idx] += sine_weights[phi_idx] * temps
 
         if last_send == "e":
             n_add += 1
         else:
             n_sub += 1
 
-    if accumulator is None:
+    if accumulators is None:
         print("No thermal frames were accumulated.")
         return
 
-    min_val = float(accumulator.min())
-    max_val = float(accumulator.max())
-    val_range = max_val - min_val
-
-    print(f"Accumulator range: [{min_val:.4f}, {max_val:.4f}]")
     print(f"Frames added: {n_add}  subtracted: {n_sub}")
 
-    if val_range == 0:
-        normalised = np.full(accumulator.shape, 128, dtype=np.uint8)
-    else:
-        normalised = ((accumulator - min_val) / val_range * 255).round().astype(np.uint8)
-
-    out_img = Image.fromarray(normalised, mode="L")
-
     base = str(Path(output_prefix).with_suffix(""))
-    filename = f"{base}_min{min_val:.4f}_max{max_val:.4f}_add{n_add}_sub{n_sub}.png"
-    out_img.save(filename)
-    print(f"Saved → {filename}")
+
+    # --- Hotspot image (φ = 0°) ---
+    hotspot = accumulators[0]
+    min_val = float(hotspot.min())
+    max_val = float(hotspot.max())
+    val_range = max_val - min_val
+
+    print(f"Hotspot accumulator range: [{min_val:.4f}, {max_val:.4f}]")
+
+    if val_range == 0:
+        normalised = np.full(hotspot.shape, 128, dtype=np.uint8)
+    else:
+        normalised = ((hotspot - min_val) / val_range * 255).round().astype(np.uint8)
+
+    hotspot_filename = f"{base}_min{min_val:.4f}_max{max_val:.4f}_add{n_add}_sub{n_sub}.png"
+    Image.fromarray(normalised, mode="L").save(hotspot_filename)
+    print(f"Saved hotspot  → {hotspot_filename}")
+
+    # --- Phase image: pixel = index of phase matrix with highest accumulator value ---
+    # argmax over axis 0 gives the best-phase index (0–359) per pixel
+    best_phase = np.argmax(accumulators, axis=0).astype(np.float32)  # shape (H, W)
+
+    # White (255) = 0°, black (0) = 359°
+    phase_pixels = np.round((359.0 - best_phase) / 359.0 * 255.0).astype(np.uint8)
+
+    phase_filename = f"{base}_phase_add{n_add}_sub{n_sub}.png"
+    Image.fromarray(phase_pixels, mode="L").save(phase_filename)
+    print(f"Saved phase    → {phase_filename}")
 
 
 def main() -> None:
