@@ -191,6 +191,18 @@ def build_hotspot(db_path: str, output_prefix: str, collection_id: int | None = 
     Image.fromarray(normalised, mode="L").save(hotspot_filename)
     print(f"Saved hotspot  → {hotspot_filename}")
 
+    for deg in (90, 180, 270):
+        acc = accumulators[deg]
+        lo, hi = float(acc.min()), float(acc.max())
+        r = hi - lo
+        if r == 0:
+            px = np.full(acc.shape, 128, dtype=np.uint8)
+        else:
+            px = ((acc - lo) / r * 255).round().astype(np.uint8)
+        fn = f"{base}_phase{deg}deg_min{lo:.4f}_max{hi:.4f}_add{n_add}_sub{n_sub}.png"
+        Image.fromarray(px, mode="L").save(fn)
+        print(f"Saved {deg:3d}°     → {fn}")
+
     # --- Phase image: pixel = index of phase matrix with highest accumulator value ---
     # argmax over axis 0 gives the best-phase index (0–359) per pixel
     best_phase = np.argmax(accumulators, axis=0).astype(np.float32)  # shape (H, W)
