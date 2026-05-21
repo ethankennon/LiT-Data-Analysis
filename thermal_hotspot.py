@@ -34,6 +34,21 @@ import numpy as np
 from PIL import Image
 
 
+def _hsv_to_rgb(h: np.ndarray, s: np.ndarray, v: np.ndarray) -> np.ndarray:
+    """Float32 HSV arrays in [0, 1] → uint8 RGB array of shape (..., 3)."""
+    h6 = h * 6.0
+    sector = h6.astype(np.int32) % 6
+    f = h6 - np.floor(h6)
+    p = v * (1.0 - s)
+    q = v * (1.0 - s * f)
+    t = v * (1.0 - s * (1.0 - f))
+    conds = [sector == i for i in range(6)]
+    r = np.select(conds, [v, q, p, p, t, v])
+    g = np.select(conds, [t, v, v, q, p, p])
+    b = np.select(conds, [p, p, t, v, v, q])
+    return (np.stack([r, g, b], axis=-1) * 255.0).round().astype(np.uint8)
+
+
 def build_hotspot(db_path: str, output_prefix: str, collection_id: int | None = None) -> None:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -191,7 +206,7 @@ def build_hotspot(db_path: str, output_prefix: str, collection_id: int | None = 
     Image.fromarray(normalised, mode="L").save(hotspot_filename)
     print(f"Saved hotspot  → {hotspot_filename}")
 
-    for deg in (90, 180, 270):
+    for deg in (30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330):
         acc = accumulators[deg]
         lo, hi = float(acc.min()), float(acc.max())
         r = hi - lo
@@ -203,15 +218,22 @@ def build_hotspot(db_path: str, output_prefix: str, collection_id: int | None = 
         Image.fromarray(px, mode="L").save(fn)
         print(f"Saved {deg:3d}°     → {fn}")
 
-    # --- Phase image: pixel = index of phase matrix with highest accumulator value ---
-    # argmax over axis 0 gives the best-phase index (0–359) per pixel
-    best_phase = np.argmax(accumulators, axis=0).astype(np.float32)  # shape (H, W)
+    # --- Phase image: hue = phase delay (red=0°, blue=359°), value = peak correlation ---
+    best_phase_idx = np.argmax(accumulators, axis=0)  # shape (H, W)
+    best_value = np.max(accumulators, axis=0)          # shape (H, W)
 
-    # White (255) = 0°, black (0) = 359°
-    phase_pixels = np.round((359.0 - best_phase) / 359.0 * 255.0).astype(np.uint8)
+    # Intensity from peak value; pixels with no positive correlation map to black
+    best_clipped = np.clip(best_value, 0.0, None)
+    val_max = float(best_clipped.max())
+    intensity = (best_clipped / val_max).astype(np.float32) if val_max > 0 else np.zeros_like(best_clipped)
 
+    # Phase 0–359 mapped to hue 0°–240° on the colour wheel (red → yellow → green → cyan → blue)
+    hue = (best_phase_idx.astype(np.float32) / 359.0 * (240.0 / 360.0))
+    saturation = np.ones(hue.shape, dtype=np.float32)
+
+    phase_rgb = _hsv_to_rgb(hue, saturation, intensity)
     phase_filename = f"{base}_phase_add{n_add}_sub{n_sub}.png"
-    Image.fromarray(phase_pixels, mode="L").save(phase_filename)
+    Image.fromarray(phase_rgb, mode="RGB").save(phase_filename)
     print(f"Saved phase    → {phase_filename}")
 
 
