@@ -3,10 +3,13 @@ Build a hotspot accumulation image from thermal frames in capture_database.db.
 
 Events are processed in timestamp order per collection:
   - Thermal images before the first SEND serial message are skipped.
-  - The most recent SEND message determines how subsequent thermals are accumulated:
-      'e'  → add pixel temperatures to the accumulator
-      'd'  → subtract pixel temperatures from the accumulator
-  - Any other SEND message still updates the tracked command (pausing accumulation).
+  - The 'e'/'d' SEND cycle period is detected from the average interval between
+    consecutive sends of the same command.
+  - Phase reference is set to the first 'e' SEND (t=0), so sin is 0 at the
+    excitation edge, +1 at the midpoint of the 'e' phase, and -1 at the midpoint
+    of the 'd' phase.
+  - For each thermal image following an 'e' or 'd' SEND, pixel temperatures are
+    multiplied by sin(2π·elapsed/period) before being added to the accumulator.
   - Processing stops after the last SEND matching the first SEND command seen.
 
 The accumulator is normalised to [0, 255] and saved as a grayscale PNG whose
@@ -76,10 +79,39 @@ def build_hotspot(db_path: str, output_prefix: str, collection_id: int | None = 
         print("No SEND serial messages found.")
         return
 
+    # Detect cycle period from consecutive sends of first_cmd
+    first_cmd_times = [
+        r["timestamp"] for r in rows
+        if r["type"] == "SERIAL_MSG" and r["direction"] == "SEND" and r["message"] == first_cmd
+    ]
+    if len(first_cmd_times) >= 2:
+        intervals = [first_cmd_times[i + 1] - first_cmd_times[i] for i in range(len(first_cmd_times) - 1)]
+        period_ns = sum(intervals) / len(intervals)
+    else:
+        # Only one send of first_cmd — estimate from half-cycle to the opposite command
+        other_cmd = "d" if first_cmd == "e" else "e"
+        other_times = [
+            r["timestamp"] for r in rows
+            if r["type"] == "SERIAL_MSG" and r["direction"] == "SEND" and r["message"] == other_cmd
+        ]
+        if not other_times:
+            print("Cannot determine cycle period: only one SEND event found.")
+            return
+        period_ns = 2.0 * abs(other_times[0] - first_cmd_times[0])
+
+    # Phase reference: first 'e' SEND is t=0 (sin=0 at excitation edge, +1 at mid-'e', -1 at mid-'d')
+    e_times = [
+        r["timestamp"] for r in rows
+        if r["type"] == "SERIAL_MSG" and r["direction"] == "SEND" and r["message"] == "e"
+    ]
+    phase_ref_ns = e_times[0] if e_times else first_cmd_times[0]
+
     print(f"First SEND command: {repr(first_cmd)}")
     print(f"Last matching SEND timestamp: {last_matching_send_ts}")
+    print(f"Detected period: {period_ns / 1e9:.4f} s  ({len(first_cmd_times)} '{first_cmd}' sends)")
+    print(f"Phase reference timestamp: {phase_ref_ns}")
 
-    # Pass 2: accumulate pixel temperatures
+    # Pass 2: accumulate pixel temperatures weighted by sin(2π·elapsed/period)
     accumulator: np.ndarray | None = None
     n_add = n_sub = 0
     seen_first_serial = False
@@ -114,11 +146,14 @@ def build_hotspot(db_path: str, output_prefix: str, collection_id: int | None = 
         max_t: float = row["maxTemp"]
         temps = min_t + (gray / 255.0) * (max_t - min_t)
 
+        elapsed_ns = row["timestamp"] - phase_ref_ns
+        sine_weight = np.sin(2 * np.pi * elapsed_ns / period_ns)
+
+        accumulator += sine_weight * temps
+
         if last_send == "e":
-            accumulator += temps
             n_add += 1
         else:
-            accumulator -= temps
             n_sub += 1
 
     if accumulator is None:
